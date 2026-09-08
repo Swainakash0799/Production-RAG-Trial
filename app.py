@@ -1,4 +1,4 @@
-# CI/CD deployment test
+# CI/CD deployment testing for Advanced-RAG-Assistant
 import os
 import tempfile
 
