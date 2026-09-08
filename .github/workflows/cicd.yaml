@@ -1,0 +1,74 @@
+name: CI/CD - IntelliDocs AI
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+
+  deploy:
+
+    name: Deploy to AWS EC2
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # -------------------------
+      # Checkout Repository
+      # -------------------------
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+
+      # -------------------------
+      # Deploy to EC2
+      # -------------------------
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.2
+
+        with:
+
+          host: ${{ secrets.EC2_HOST }}
+
+          username: ${{ secrets.EC2_USERNAME }}
+
+          key: ${{ secrets.EC2_SSH_KEY }}
+
+          script: |
+
+            # Go to project directory
+            cd ~/IntelliDocs-AI
+
+            # Get latest code
+            git pull origin main
+
+            # Stop old container
+            docker stop intellidocs-ai || true
+
+            # Remove old container
+            docker rm intellidocs-ai || true
+
+            # Build latest Docker image
+            docker build -t intellidocs-ai .
+
+            # Run new container
+            docker run -d \
+              --name intellidocs-ai \
+              --restart unless-stopped \
+              -p 8501:8501 \
+              --env-file /home/ubuntu/.env \
+              -v /home/ubuntu/intellidocs/chroma_db:/app/chroma_db \
+              -v /home/ubuntu/intellidocs/uploads:/app/uploads \
+              intellidocs-ai
+
+            # Remove unused images
+            docker image prune -f
+
+            # Show running container
+            docker ps
