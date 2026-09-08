@@ -1,0 +1,17 @@
+.venv
+venv
+env
+__pycache__
+*.pyc
+.git
+.gitignore
+.env
+.env.*
+chroma_db
+uploads
+logs
+.cache
+.pytest_cache
+.mypy_cache
+.ipynb_checkpoints
+.streamlit/secrets.toml
