@@ -14,13 +14,15 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency file first
+# Install uv
+RUN pip install --no-cache-dir uv
+
+# Copy dependency files first
 # This allows Docker to cache the dependency layer
-COPY requirements.txt .
+COPY pyproject.toml uv.lock ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN uv sync --frozen --no-dev
 
 # Copy project files
 COPY . .
@@ -32,4 +34,4 @@ RUN mkdir -p chroma_db uploads logs
 EXPOSE 8501
 
 # Start Streamlit
-CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["uv", "run", "streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
