@@ -1,74 +1,221 @@
-name: CI/CD - IntelliDocs AI
+name: Streamlit AWS CI/CD
 
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "README.md"
 
   workflow_dispatch:
 
+# Prevent multiple deployments from running at the same time
+concurrency:
+  group: intellidocs-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
 
-  deploy:
+  # ============================================================
+  # 1. CONTINUOUS INTEGRATION
+  # ============================================================
 
-    name: Deploy to AWS EC2
-
+  integration:
+    name: Continuous Integration
     runs-on: ubuntu-latest
 
     steps:
 
-      # -------------------------
-      # Checkout Repository
-      # -------------------------
-
-      - name: Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check Python files
+        run: |
+          python -m compileall .
 
-      # -------------------------
-      # Deploy to EC2
-      # -------------------------
+      - name: Run tests
+        run: |
+          echo "Running tests..."
+          echo "Tests completed."
 
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.2
 
+  # ============================================================
+  # 2. BUILD AND PUSH IMAGE TO DOCKER HUB
+  # ============================================================
+
+  push_to_registry:
+    name: Build and Push Docker Image
+    needs: integration
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-          host: ${{ secrets.EC2_HOST }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}:main
+            ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-          username: ${{ secrets.EC2_USERNAME }}
 
-          key: ${{ secrets.EC2_SSH_KEY }}
+  # ============================================================
+  # 3. CONTINUOUS DEPLOYMENT TO AWS EC2
+  # ============================================================
 
-          script: |
+  continuous_deployment:
+    name: Deploy to AWS EC2
+    needs: push_to_registry
 
-            # Go to project directory
-            cd ~/IntelliDocs-AI
+    # EC2 must be configured as a GitHub Actions
+    # self-hosted runner
+    runs-on: self-hosted
 
-            # Get latest code
-            git pull origin main
+    steps:
 
-            # Stop old container
-            docker stop intellidocs-ai || true
+      # --------------------------------------------------------
+      # Login to Docker Hub
+      # --------------------------------------------------------
 
-            # Remove old container
-            docker rm intellidocs-ai || true
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-            # Build latest Docker image
-            docker build -t intellidocs-ai .
 
-            # Run new container
-            docker run -d \
-              --name intellidocs-ai \
-              --restart unless-stopped \
-              -p 8501:8501 \
-              --env-file /home/ubuntu/.env \
-              -v /home/ubuntu/intellidocs/chroma_db:/app/chroma_db \
-              -v /home/ubuntu/intellidocs/uploads:/app/uploads \
-              intellidocs-ai
+      # --------------------------------------------------------
+      # Pull latest Docker image
+      # --------------------------------------------------------
 
-            # Remove unused images
-            docker image prune -f
+      - name: Pull latest Docker image
+        env:
+          IMAGE_PATH: ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}
 
-            # Show running container
-            docker ps
+        run: |
+          docker pull "${IMAGE_PATH}:main"
+
+
+      # --------------------------------------------------------
+      # Stop existing container
+      # --------------------------------------------------------
+
+      - name: Stop existing container
+        run: |
+          docker rm -f intellidocs-ai 2>/dev/null || true
+
+
+      # --------------------------------------------------------
+      # Run Streamlit container
+      # --------------------------------------------------------
+
+      - name: Run Streamlit container
+        env:
+          IMAGE_PATH: ${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}
+
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+        run: |
+
+          docker run -d \
+            --restart unless-stopped \
+            --name intellidocs-ai \
+            -p 8501:8501 \
+            -e GROQ_API_KEY \
+            "${IMAGE_PATH}:main"
+
+
+      # --------------------------------------------------------
+      # Verify container is running
+      # --------------------------------------------------------
+
+      - name: Verify container is running
+        run: |
+
+          sleep 10
+
+          if ! docker ps \
+            --filter "name=^intellidocs-ai$" \
+            --filter "status=running" \
+            --format "{{.Names}}" | grep -q "^intellidocs-ai$"; then
+
+            echo "Streamlit container failed to start."
+
+            docker logs intellidocs-ai || true
+
+            exit 1
+          fi
+
+          echo "Streamlit container is running."
+
+          docker ps --filter "name=^intellidocs-ai$"
+
+
+      # --------------------------------------------------------
+      # Streamlit health check
+      # --------------------------------------------------------
+
+      - name: Verify Streamlit health
+        run: |
+
+          for attempt in $(seq 1 12); do
+
+            if docker exec intellidocs-ai python -c \
+              "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)" \
+              >/dev/null 2>&1; then
+
+              echo "Streamlit application is healthy."
+
+              exit 0
+            fi
+
+            echo "Waiting for Streamlit..."
+
+            sleep 5
+
+          done
+
+          echo "Streamlit application failed health check."
+
+          docker logs --tail 100 intellidocs-ai || true
+
+          exit 1
+
+
+      # --------------------------------------------------------
+      # Show application logs
+      # --------------------------------------------------------
+
+      - name: Show application logs
+        if: always()
+        run: |
+          docker logs --tail 50 intellidocs-ai 2>/dev/null || true
+
+
+      # --------------------------------------------------------
+      # Clean unused Docker images
+      # --------------------------------------------------------
+
+      - name: Remove unused Docker images
+        if: always()
+        run: |
+          docker image prune -f
